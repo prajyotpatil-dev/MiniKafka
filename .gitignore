@@ -1,31 +1,10 @@
-# node_modules
 node_modules/
-
-# build
 dist/
-dist-ssr/
 target/
 
-# logs
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-
-# env
 .env
-.env.local
 .env.*
 !.env.example
-
-# editor
-.vscode/*
-!.vscode/extensions.json
-.idea
-*.suo
-*.ntvs*
-*.njsproj
-*.sln
-*.sw?
 
 .claude/
 SERPROFILE/
