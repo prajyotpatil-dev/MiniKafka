@@ -1,119 +1,228 @@
-# MiniKafka - Java Messaging API (Phase 2)
+# MiniKafka - Kafka-Inspired Message Broker in Java
 
-MiniKafka is a lightweight, high-performance, Kafka-inspired in-memory message broker built in Java 21 and Spring Boot 3.4.
-
-This document describes the Phase 2 architecture, which introduces the high-level **Producer** and **Consumer** messaging APIs on top of the Phase 1 core engine.
+MiniKafka is a lightweight, high-performance, Kafka-inspired message broker built in Java 21 and Spring Boot 3.4. It progresses through incremental phases — from an in-memory core engine, through rich client APIs, to durable file-backed persistent storage with crash recovery.
 
 ---
 
 ## 🏛️ Architecture Overview
 
-The broker core organizes messages into **Topics**, which are divided into **Partitions**. Phase 2 introduces standalone client wrappers that interface with the broker using domain-specific configuration and record models.
+Messages are organized into **Topics**, which are divided into **Partitions**. Producers write messages to partitions (round-robin or key-based), and Consumers poll messages using fair round-robin fetching. The storage layer is pluggable — each partition is backed by either an `InMemoryMessageLog` or a `FileMessageLog` depending on the configured `StorageConfig`.
 
 ```
-┌─────────────────┐       ┌─────────────────┐       ┌─────────────────┐
-│                 │       │                 │       │                 │
-│ Producer Client ├───┬───▶MiniKafka Broker ├───────▶ Consumer Client │
-│                 │   │   │                 │       │                 │
-└─────────────────┘   │   └─────────────────┘       └─────────────────┘
-                      │      (TopicManager,                 ▲
-                      │       Partitioner,                  │
-                      │       MessageLog)                   │
-┌─────────────────┐   │                                     │
-│                 │   │                                     │
-│ Producer Client ├───┘                                     │
-│                 │                                         │
-└─────────────────┘                                         │
-                                                            │
-┌─────────────────┐                                         │
-│                 │                                         │
-│ Consumer Client ├─────────────────────────────────────────┘
+┌─────────────────┐       ┌──────────────────────────────┐       ┌─────────────────┐
+│                 │       │       MiniKafka Broker        │       │                 │
+│ Producer Client ├───┬───▶  TopicManager, Partitioner   ├───────▶ Consumer Client │
+│                 │   │   │  OffsetManager, StorageEngine │       │                 │
+└─────────────────┘   │   └──────────────┬───────────────┘       └─────────────────┘
+                      │                  │                                ▲
+┌─────────────────┐   │   ┌──────────────▼───────────────┐                │
+│                 │   │   │   Per-Partition MessageLog    │                │
+│ Producer Client ├───┘   │  (InMemory or File-backed)   │                │
+│                 │       └──────────────────────────────┘                │
+└─────────────────┘                                                      │
+                                                                         │
+┌─────────────────┐                                                      │
+│                 │                                                      │
+│ Consumer Client ├──────────────────────────────────────────────────────┘
 │                 │
 └─────────────────┘
 ```
 
 ---
 
-## 📦 Phase 2 Client APIs
+## 📦 Phase 1 — Core Broker Engine
 
-### Producer API
+The foundational in-memory broker with:
 
-- **`ProducerConfig`**: Publisher configuration built via a builder pattern. Requires a `producerId`.
-- **`ProducerRecord`**: The data model for messages to be sent. Key is optional. Data is immutable.
-- **`RecordMetadata`**: The result returned by a send operation, detailing the exact partition, offset, timestamp, and unique message ID assigned by the broker.
-- **`Producer`**: The operational client wrapper. Implements `AutoCloseable` to cleanly stop accepting new records.
-
-### Consumer API
-
-- **`ConsumerConfig`**: Subscriber configuration built via a builder pattern. Requires a `consumerId`.
-- **`ConsumerSubscription`**: Manages the topics the consumer is interested in.
-- **`ConsumerRecord`**: The data model returned to the consumer. Contains full broker metadata alongside the payload.
-- **`Consumer`**: The operational client wrapper. Handles subscription, periodic polling, position tracking, and deliberate seeking. Implements `AutoCloseable`.
+- **`Broker`**: Central entry point for topic creation, message publishing, and reading.
+- **`TopicManager`**: Manages topic lifecycle (create, delete, list).
+- **`Partitioner`**: Distributes messages across partitions (round-robin or key-hash based).
+- **`OffsetManager`**: Tracks per-partition offsets.
+- **`Message`** / **`Partition`** / **`Topic`**: Core domain models.
+- Thread-safe via `ConcurrentHashMap` and `ReentrantReadWriteLock`.
 
 ---
 
-## 🔄 Consumer Polling & Subscription Mechanics
+## 📦 Phase 2 — Java Client APIs
 
-In Phase 2, the message consumption semantics are specific and deterministic:
+High-level Producer and Consumer wrappers on top of the Phase 1 engine:
 
-### 1. Polling Strategy
-The `poll(maxRecords)` method fetches messages across multiple subscribed partitions. It uses a **fair round-robin strategy**:
-- Partitions are sorted deterministically (by topic name alphabetically, then partition index).
-- The consumer loops over these partitions reading **one message per partition per pass** until it exhausts available messages or hits `maxRecords`.
-- This prevents a high-volume partition from starving other partitions during consumption.
+### Producer API
 
-### 2. Consumer Positions (Offsets)
-- Each `Consumer` instance maintains its own in-memory `Map<TopicPartition, Long>` tracking the **next offset to read** for each partition.
-- These positions start at offset `0` when a topic is subscribed.
-- After a successful read during `poll()`, the position strictly advances by 1.
-- Note: Positions are **not** persisted or committed to the broker in Phase 2. They live purely in the client's memory.
+- **`ProducerConfig`**: Publisher configuration via builder pattern. Requires a `producerId`.
+- **`ProducerRecord`**: Immutable message model to send. Key is optional.
+- **`RecordMetadata`**: Result of a send — partition, offset, timestamp, message ID.
+- **`Producer`**: Operational client. Implements `AutoCloseable`.
 
-### 3. Seek Interface
-- Consumers can explicitly move their read pointer using `seek(topic, partition, offset)`.
-- Re-reading historical data or skipping ahead is fully supported as long as the topic is subscribed and the offset is valid (>= 0).
+### Consumer API
 
-### 4. Ordering Guarantees
-- **Per-partition ordering is guaranteed.** Messages published to a specific partition will be yielded by `poll()` in the exact order they were appended.
-- **Global topic ordering is NOT guaranteed.** If a topic has 3 partitions, messages across these partitions may interleave during a poll.
+- **`ConsumerConfig`**: Subscriber configuration via builder pattern. Requires a `consumerId`.
+- **`ConsumerSubscription`**: Manages subscribed topics.
+- **`ConsumerRecord`**: Message model returned to the consumer with full broker metadata.
+- **`Consumer`**: Operational client — subscription, polling, position tracking, and seeking. Implements `AutoCloseable`.
 
-### 5. Why No Consumer Groups Yet?
-Phase 2 intentionally models **independent consumers**. If two consumers subscribe to the same topic, **both will read the exact same messages independently**. 
-Load-balancing messages among workers (Consumer Groups) and rebalancing assignments are complex distributed systems concepts reserved for a later phase. 
+### Polling & Subscription Mechanics
+
+| Behavior | Detail |
+|---|---|
+| **Polling strategy** | Fair round-robin across all subscribed partitions — one message per partition per pass, prevents starvation |
+| **Consumer positions** | In-memory `Map<TopicPartition, Long>`, starting at offset 0. Not persisted or committed to broker |
+| **Seek** | `seek(topic, partition, offset)` — re-read or skip ahead freely |
+| **Per-partition ordering** | ✅ Guaranteed |
+| **Global topic ordering** | ❌ Not guaranteed across partitions |
+| **Consumer groups** | ❌ Not yet — each consumer reads all messages independently |
+
+---
+
+## 📦 Phase 3 — Persistent Storage & Recovery
+
+Phase 3 adds **durable, file-backed storage** so messages survive broker restarts and JVM crashes.
+
+### Storage Architecture
+
+```
+data/minikafka/
+└── topics/
+    ├── orders/
+    │   ├── partition-0.log
+    │   ├── partition-1.log
+    │   └── partition-2.log
+    └── events/
+        ├── partition-0.log
+        └── partition-1.log
+```
+
+### Key Components
+
+| Component | Description |
+|---|---|
+| **`StorageConfig`** | Configures persistent vs. in-memory mode. Factory methods: `persistent(path)`, `defaultPersistent()`, `inMemory()`. Supports `flushOnWrite` for fsync-on-every-append durability. |
+| **`MessageLog`** | Interface for the append-only partition log. Defines `append`, `read`, `readFrom`, `size`, `getLatestOffset`, `getNextOffset`. |
+| **`InMemoryMessageLog`** | Thread-safe `ArrayList`-backed implementation (Phase 1/2 default). |
+| **`FileMessageLog`** | File-backed append-only log using `FileChannel`. Length-prefixed binary framing: `[4-byte record length][N-byte serialized message]`. Thread-safe via `ReentrantReadWriteLock`. |
+| **`MessageSerializer`** | Binary serialization/deserialization of `Message` objects using `DataOutputStream`/`DataInputStream`. Handles optional fields (key, producerId) with boolean flags. |
+| **`MessageLogFactory`** | `@FunctionalInterface` factory — returns `InMemoryMessageLog` or `FileMessageLog` based on config. |
+| **`StorageEngine`** | Orchestrates persistence. Creates partition logs via the factory, discovers existing topic/partition directories on startup, and drives recovery. Implements `Closeable`. |
+
+### Recovery Mechanism
+
+On broker startup with persistent storage, the `StorageEngine.startAndRecover()` method:
+
+1. Scans the `topics/` directory for existing topic subdirectories.
+2. Discovers `partition-N.log` files within each topic directory.
+3. Each `FileMessageLog` reads its log file sequentially, recovering all complete records.
+4. **Truncated tail policy**: If the final record is partially written (incomplete length prefix or data), the file is truncated to the last valid position. No data loss for completed records.
+5. **Middle-of-log corruption**: If a record in the middle has an offset discontinuity or fails deserialization, a `CorruptedLogException` is thrown — MiniKafka does **not** silently skip corrupted entries.
+6. Recovered topics and partitions are re-registered in the `Broker` and `TopicManager`.
+
+### Durability Guarantees
+
+- Each `append()` writes to disk **before** updating the in-memory index — crash-safe ordering.
+- When `flushOnWrite` is enabled (default for persistent mode), `FileChannel.force(true)` is called after every write — fsync to OS.
+- Records use length-prefixed framing for safe boundary detection during recovery.
+
+### New Exceptions
+
+- **`StorageException`**: Wraps I/O failures during log read/write operations.
+- **`CorruptedLogException`**: Signals unrecoverable mid-log corruption detected during recovery.
+
+### Backward Compatibility
+
+Phase 3 is fully backward-compatible. Pass `StorageConfig.inMemory()` to the broker for the original Phase 1/2 pure in-memory behavior — no file I/O, no directories created.
 
 ---
 
 ## 🔒 Concurrency Design & Guarantees
 
-The clients interface flawlessly with the Phase 1 thread-safe engine:
-- Dozens of `Producer` instances can send messages concurrently to the same topic without losing data or producing offset collisions. 
-- Dozens of `Consumer` instances can read from the same topic simultaneously without blocking the writers or each other.
-- The `ConcurrentHashMap`-based structure means neither producers nor consumers block on global locks.
+- Multiple `Producer` instances can send messages concurrently to the same topic without data loss or offset collisions.
+- Multiple `Consumer` instances can read from the same topic simultaneously without blocking writers or each other.
+- `ConcurrentHashMap` for topic/partition management; `ReentrantReadWriteLock` for per-partition log access.
+- The `FileMessageLog` uses the same locking strategy — concurrent reads, exclusive writes.
 
 ---
 
 ## 🧪 Testing & Verification
 
-The suite includes 66 comprehensive JUnit 5 tests covering both Phase 1 core broker functionality and Phase 2 client integration:
-- **`ProducerTest` & `ConsumerTest`**: Deep unit testing of configuration limits, subscription lifecycle, poll limits, and negative testing (closed states, invalid seeks).
-- **`ProducerIntegrationTest`**: Concurrency stress testing. 20 producer threads sending 100 messages simultaneously (2,000 messages total). Verified 100% throughput with distinct sequential offsets.
-- **`ConsumerIntegrationTest`**: Full multi-consumer round-trips ensuring complete isolation and message delivery without interference.
+The suite includes **81 JUnit 5 tests** covering all three phases:
 
-Run tests with:
+| Suite | Coverage |
+|---|---|
+| `BrokerTest`, `TopicManagerTest`, `OffsetManagerTest` | Phase 1 core engine |
+| `Phase1FunctionalVerificationTest` | End-to-end Phase 1 verification |
+| `ProducerTest`, `ProducerConfigTest`, `ProducerIntegrationTest` | Producer API + 20-thread × 100-message concurrency stress test |
+| `ConsumerTest`, `ConsumerConfigTest`, `ConsumerIntegrationTest` | Consumer API + multi-consumer isolation |
+| `MessageTest` | Core message model |
+| `MessageLogTest` | In-memory log operations + concurrent append stress test |
+| `Phase3PersistenceTest` | File-backed storage, recovery, truncated tail handling, corruption detection, broker restart round-trips |
+
+Run tests:
 ```bash
 ./mvnw clean test
 ```
 
-Package the JAR with:
+Package the JAR:
 ```bash
 ./mvnw clean package
 ```
 
 ---
 
-## ⚠️ What Phase 2 Does NOT Include
+## 🗂️ Project Structure
 
-In accordance with Phase 2 boundaries, the following are deferred to subsequent phases:
+```
+src/main/java/com/minikafka/
+├── MiniKafkaApplication.java         # Spring Boot entry point
+├── Phase1Demo.java                   # Phase 1 demo runner
+├── Phase2Demo.java                   # Phase 2 demo runner
+├── broker/
+│   ├── Broker.java                   # Central broker
+│   ├── TopicManager.java             # Topic lifecycle
+│   ├── Partitioner.java              # Partition assignment
+│   └── OffsetManager.java            # Offset tracking
+├── config/
+│   ├── BrokerConfig.java             # Broker configuration
+│   └── StorageConfig.java            # Persistent/in-memory storage config
+├── consumer/
+│   ├── Consumer.java                 # Consumer client
+│   ├── ConsumerConfig.java           # Consumer configuration
+│   ├── ConsumerRecord.java           # Consumed message model
+│   └── ConsumerSubscription.java     # Subscription manager
+├── exception/
+│   ├── CorruptedLogException.java    # Mid-log corruption
+│   ├── InvalidOffsetException.java
+│   ├── InvalidPartitionException.java
+│   ├── InvalidTopicException.java
+│   ├── MessageNotFoundException.java
+│   ├── MiniKafkaException.java       # Base exception
+│   ├── StorageException.java         # Storage I/O errors
+│   ├── TopicAlreadyExistsException.java
+│   └── TopicNotFoundException.java
+├── model/
+│   ├── Message.java                  # Core message
+│   ├── Partition.java                # Partition with MessageLog
+│   ├── PublishResult.java
+│   ├── Topic.java                    # Topic with partitions
+│   └── TopicPartition.java
+├── producer/
+│   ├── Producer.java                 # Producer client
+│   ├── ProducerConfig.java           # Producer configuration
+│   ├── ProducerRecord.java           # Message to send
+│   └── RecordMetadata.java           # Send result metadata
+└── storage/
+    ├── FileMessageLog.java           # File-backed append-only log
+    ├── InMemoryMessageLog.java       # In-memory append-only log
+    ├── MessageLog.java               # Log interface
+    ├── MessageLogFactory.java        # Factory interface
+    ├── MessageSerializer.java        # Binary message serialization
+    └── StorageEngine.java            # Storage orchestrator + recovery
+```
+
+---
+
+## ⚠️ What's Next (Not Yet Implemented)
+
 - REST HTTP Controllers & API endpoints
-- PostgreSQL / Disk persistence
 - Consumer Group rebalancing & offset committing
-- Networking layers (broker and clients run in the same JVM currently)
+- Log segmentation & compaction
+- Networking layers (broker and clients currently run in the same JVM)
+- Frontend integration with the React/Vite dashboard

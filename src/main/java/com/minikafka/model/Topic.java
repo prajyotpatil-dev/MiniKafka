@@ -1,13 +1,13 @@
 package com.minikafka.model;
 
 import com.minikafka.exception.InvalidPartitionException;
+import com.minikafka.storage.MessageLogFactory;
 
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
-import java.util.concurrent.CopyOnWriteArrayList;
 
 /**
  * Domain entity representing a Topic in MiniKafka.
@@ -19,7 +19,19 @@ public class Topic {
     private final List<Partition> partitions;
     private final Instant createdAt;
 
+    /**
+     * Creates a new topic with the specified partition count using in-memory message logs.
+     */
     public Topic(String name, int partitionCount) {
+        this(name, partitionCount, null);
+    }
+
+    /**
+     * Creates a new topic with the specified partition count, using the given factory
+     * to build each partition's message log. If the factory is null, defaults to
+     * in-memory message logs.
+     */
+    public Topic(String name, int partitionCount, MessageLogFactory logFactory) {
         this.name = validateTopicName(name);
         if (partitionCount < 1) {
             throw new InvalidPartitionException("Partition count must be at least 1, provided: " + partitionCount);
@@ -27,9 +39,30 @@ public class Topic {
 
         List<Partition> list = new ArrayList<>(partitionCount);
         for (int i = 0; i < partitionCount; i++) {
-            list.add(new Partition(this.name, i));
+            if (logFactory != null) {
+                list.add(new Partition(this.name, i, logFactory.create(this.name, i)));
+            } else {
+                list.add(new Partition(this.name, i));
+            }
         }
         this.partitions = Collections.unmodifiableList(list);
+        this.createdAt = Instant.now();
+    }
+
+    /**
+     * Recovery constructor: creates a topic from pre-built partitions.
+     * Used during startup to restore topics from persistent storage.
+     *
+     * @param name the topic name
+     * @param recoveredPartitions the list of already-recovered Partition instances
+     */
+    public Topic(String name, List<Partition> recoveredPartitions) {
+        this.name = validateTopicName(name);
+        Objects.requireNonNull(recoveredPartitions, "recoveredPartitions must not be null");
+        if (recoveredPartitions.isEmpty()) {
+            throw new InvalidPartitionException("Recovered topic must have at least 1 partition");
+        }
+        this.partitions = Collections.unmodifiableList(new ArrayList<>(recoveredPartitions));
         this.createdAt = Instant.now();
     }
 

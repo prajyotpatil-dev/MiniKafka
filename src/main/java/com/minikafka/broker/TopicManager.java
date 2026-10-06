@@ -4,12 +4,12 @@ import com.minikafka.exception.InvalidTopicException;
 import com.minikafka.exception.TopicAlreadyExistsException;
 import com.minikafka.exception.TopicNotFoundException;
 import com.minikafka.model.Topic;
+import com.minikafka.storage.MessageLogFactory;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 
@@ -50,6 +50,56 @@ public class TopicManager {
 
         log.info("Created topic '{}' with {} partition(s)", normalizedName, partitionCount);
         return newTopic;
+    }
+
+    /**
+     * Creates a new topic with the specified partition count, using a custom
+     * MessageLogFactory to build each partition's message log.
+     *
+     * @param name           the topic name
+     * @param partitionCount the number of partitions (>= 1)
+     * @param logFactory     the factory to produce each partition's MessageLog
+     * @return the created Topic
+     * @throws InvalidTopicException        if name is null/empty or partition count < 1
+     * @throws TopicAlreadyExistsException if topic with the name already exists
+     */
+    public Topic createTopic(String name, int partitionCount, MessageLogFactory logFactory) {
+        if (name == null || name.trim().isEmpty()) {
+            throw new InvalidTopicException("Topic name must not be null or blank");
+        }
+        if (partitionCount < 1) {
+            throw new InvalidTopicException("Partition count must be at least 1, received: " + partitionCount);
+        }
+
+        String normalizedName = name.trim();
+        Topic newTopic = new Topic(normalizedName, partitionCount, logFactory);
+
+        Topic existing = topics.putIfAbsent(normalizedName, newTopic);
+        if (existing != null) {
+            throw new TopicAlreadyExistsException(normalizedName);
+        }
+
+        log.info("Created topic '{}' with {} partition(s) [factory-backed]", normalizedName, partitionCount);
+        return newTopic;
+    }
+
+    /**
+     * Registers a pre-built (recovered) topic into the manager.
+     * Used during startup to restore topics from persistent storage.
+     *
+     * @param topic the recovered topic
+     * @throws TopicAlreadyExistsException if a topic with the same name is already registered
+     */
+    public void registerTopic(Topic topic) {
+        if (topic == null) {
+            throw new InvalidTopicException("Cannot register a null topic");
+        }
+        Topic existing = topics.putIfAbsent(topic.getName(), topic);
+        if (existing != null) {
+            throw new TopicAlreadyExistsException(topic.getName());
+        }
+        log.info("Registered recovered topic '{}' with {} partition(s)",
+                topic.getName(), topic.getPartitionCount());
     }
 
     /**

@@ -1,5 +1,6 @@
 package com.minikafka.broker;
 
+import com.minikafka.config.BrokerConfig;
 import com.minikafka.exception.InvalidOffsetException;
 import com.minikafka.exception.InvalidPartitionException;
 import com.minikafka.exception.MessageNotFoundException;
@@ -9,9 +10,12 @@ import com.minikafka.model.Partition;
 import com.minikafka.model.PublishResult;
 import com.minikafka.model.Topic;
 import com.minikafka.model.TopicPartition;
+import com.minikafka.storage.StorageEngine;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.Closeable;
+import java.io.IOException;
 import java.time.Instant;
 import java.util.List;
 import java.util.Objects;
@@ -29,23 +33,50 @@ import java.util.UUID;
  * </ul>
  * </p>
  */
-public class Broker {
+public class Broker implements Closeable {
 
     private static final Logger log = LoggerFactory.getLogger(Broker.class);
 
+    private final BrokerConfig config;
     private final TopicManager topicManager;
     private final OffsetManager offsetManager;
     private final Partitioner partitioner;
+    private final StorageEngine storageEngine;
 
     public Broker() {
-        this(new TopicManager(), new OffsetManager(), new Partitioner.DefaultPartitioner());
+        this(new BrokerConfig(), new TopicManager(), new OffsetManager(), new Partitioner.DefaultPartitioner());
     }
 
     public Broker(TopicManager topicManager, OffsetManager offsetManager, Partitioner partitioner) {
+        this(new BrokerConfig(), topicManager, offsetManager, partitioner);
+    }
+
+    public Broker(BrokerConfig config, TopicManager topicManager, OffsetManager offsetManager, Partitioner partitioner) {
+        this.config = Objects.requireNonNull(config, "config must not be null");
         this.topicManager = Objects.requireNonNull(topicManager, "topicManager must not be null");
         this.offsetManager = Objects.requireNonNull(offsetManager, "offsetManager must not be null");
         this.partitioner = Objects.requireNonNull(partitioner, "partitioner must not be null");
-        log.info("MiniKafka Broker core engine initialized");
+
+        this.storageEngine = new StorageEngine(config.getStorageConfig());
+
+        // Recover topics from persistent storage
+        List<Topic> recoveredTopics = this.storageEngine.startAndRecover();
+        for (Topic topic : recoveredTopics) {
+            this.topicManager.registerTopic(topic);
+        }
+
+        log.info("MiniKafka Broker core engine initialized ({} recovered topics)", recoveredTopics.size());
+    }
+
+    // ==========================================
+    // Lifecycle APIs
+    // ==========================================
+
+    @Override
+    public void close() throws IOException {
+        log.info("Shutting down MiniKafka Broker...");
+        storageEngine.close();
+        log.info("Broker fully shut down");
     }
 
     // ==========================================
@@ -60,7 +91,7 @@ public class Broker {
      * @return the created Topic
      */
     public Topic createTopic(String topicName, int partitions) {
-        return topicManager.createTopic(topicName, partitions);
+        return topicManager.createTopic(topicName, partitions, storageEngine);
     }
 
     /**

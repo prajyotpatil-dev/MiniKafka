@@ -8,6 +8,7 @@ public class BrokerConfig {
     private int defaultPartitions = 1;
     private int maxPartitionsPerTopic = 100;
     private int defaultReadBatchLimit = 500;
+    private StorageConfig storageConfig = StorageConfig.inMemory();
 
     public BrokerConfig() {
     }
@@ -40,5 +41,13 @@ public class BrokerConfig {
 
     public void setDefaultReadBatchLimit(int defaultReadBatchLimit) {
         this.defaultReadBatchLimit = defaultReadBatchLimit;
+    }
+
+    public StorageConfig getStorageConfig() {
+        return storageConfig;
+    }
+
+    public void setStorageConfig(StorageConfig storageConfig) {
+        this.storageConfig = storageConfig != null ? storageConfig : StorageConfig.inMemory();
     }
 }
